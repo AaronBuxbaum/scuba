@@ -8,6 +8,7 @@ import { SubmitButton } from "@/components/SubmitButton";
 import { createBooking } from "@/db/bookings";
 import { getDb } from "@/db/client";
 import { getBookingForTrip, getDefaultShop, getTripWithBooked } from "@/db/queries";
+import { getWaiverForBooking, issueWaiver } from "@/db/waivers";
 import { formatShortDate, formatTimeRange, formatTimeRangeTz } from "@/lib/format";
 import { capacityLabel, isFull, spotsRemaining } from "@/lib/trips";
 
@@ -47,6 +48,7 @@ export default async function TripDetailPage({
   // The confirmation renders only from a real booking row — never from a
   // URL claim (design principle 6: trustworthy by inspection).
   const confirmed = bookingId ? await getBookingForTrip(db, tripId, bookingId) : null;
+  const waiver = confirmed ? await getWaiverForBooking(db, shop.id, confirmed.booking.id) : null;
 
   const inPast = trip.startsAt <= new Date();
   const full = isFull(trip);
@@ -76,6 +78,9 @@ export default async function TripDetailPage({
             : "unavailable";
       redirect(`/trips/${tripId}?error=${code}`);
     }
+    // Hand the diver their waiver link up front. No published template? The
+    // booking still stands; staff can send the link later from the roster.
+    await issueWaiver(dbi, { shopId: shopNow.id, bookingId: outcome.bookingId });
     redirect(`/trips/${tripId}?booking=${outcome.bookingId}`);
   }
 
@@ -109,6 +114,28 @@ export default async function TripDetailPage({
             {formatTimeRangeTz(trip.startsAt, trip.endsAt, "en-US", shop.timezone)} — be at the dock
             30 minutes early and we'll take it from there.
           </p>
+          {waiver && waiver.status === "pending" ? (
+            <div className="mt-4 rounded-lg border border-border bg-surface p-4">
+              <p className="text-sm font-medium">One thing before you arrive</p>
+              <p className="mt-1 text-sm text-muted">
+                Sign your dive waiver now and skip the paperwork at the dock.
+              </p>
+              <Link
+                href={`/waiver/${waiver.token}`}
+                className="mt-3 inline-block min-h-11 rounded-lg bg-primary px-5 py-2.5 text-base font-medium text-primary-foreground transition-colors duration-200 hover:bg-primary-hover"
+              >
+                Complete your waiver
+              </Link>
+            </div>
+          ) : waiver && waiver.status === "signed" ? (
+            <p className="mt-4 text-sm font-medium text-success">
+              ✓ Waiver signed — you're all set.
+            </p>
+          ) : waiver && waiver.status === "referral_required" ? (
+            <p className="mt-4 text-sm font-medium text-warning">
+              Your waiver needs a physician's sign-off — bring it to check-in.
+            </p>
+          ) : null}
           <Link
             href="/trips"
             className="mt-3 inline-block py-2 text-base font-medium text-primary hover:underline"

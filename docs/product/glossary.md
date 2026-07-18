@@ -37,7 +37,15 @@ new domain concept, define it here in the same PR.
   boards. The app's job is making "ready to board" a single glance.
 - **Waiver / release** — liability release signed per shop (sometimes per activity), typically
   with a **medical statement** (RSTC form). Some answers on the medical form require a
-  physician sign-off — that's a blocking state, not a checkbox.
+  physician sign-off — that's a blocking state, not a checkbox. We model it as a versioned
+  **waiver template** (release body + medical questions) and a per-booking signed **waiver**
+  instance. A waiver is `pending` (link issued, unsigned), `signed`, or `referral_required`.
+- **Medical referral** — a "yes" to any medical-statement question. It is **fail-closed**: the
+  waiver becomes `referral_required` (never `signed`/ready) until a physician's sign-off is
+  produced. An unanswered required question is treated the same way — never silently passed.
+- **Waiver template version** — each edit to a published template creates a new immutable version
+  row; a signed waiver pins the exact version (wording) the diver agreed to, so signed history
+  stays reproducible.
 - **DAN** — Divers Alert Network; dive accident insurance divers may carry. Worth a field, not
   a feature.
 

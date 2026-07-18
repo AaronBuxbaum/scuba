@@ -29,10 +29,21 @@ Tooling, docs, agent layer, CI, design tokens. Everything after this leans on it
   prerequisite gating is just a trip, and shops can schedule it as one meanwhile.
 - ⬜ Booking notifications (email confirmations) — arrives with M7 notifications.
 
-## M3 — Waivers
+## M3 — Waivers (first slice shipped)
 
-- Waiver templates, e-signature flow (pre-arrival via link), storage, status on the booking.
-- Medical statement with physician-referral blocking state.
+- ✅ Versioned waiver templates + per-booking signed waivers
+  ([`schema.ts`](../../src/db/schema.ts): `waiver_templates`, `waivers`; ADR
+  [20260718-waiver-signatures](../architecture/decisions/20260718-waiver-signatures.md): typed-name
+  signature, immutable signed records, token completion links).
+- ✅ Pre-arrival signing flow: booking auto-issues a secure, expiring link; diver signs the release +
+  medical statement at `/waiver/[token]`; fail-closed physician-referral state. Framework-free rules
+  in [`src/lib/waivers.ts`](../../src/lib/waivers.ts); idempotent, transactional submission in
+  [`src/db/waivers.ts`](../../src/db/waivers.ts).
+- ✅ Staff readiness: `/shop/trips/[id]` roster shows per-diver waiver status and a copy/send link;
+  diver confirmation on `/trips/[id]` surfaces the next step.
+- ⬜ Follow-ups (see [waivers-open-decisions.md](waivers-open-decisions.md)): staff template
+  authoring/versioning UI, resume/re-send UX, medical-answer privacy at rest (with hosting ADR),
+  signed-PDF export, and a shared readiness model that M4 will generalize.
 
 ## M4 — Cert checks
 

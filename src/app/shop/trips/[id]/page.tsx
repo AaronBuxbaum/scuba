@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { z } from "zod";
+import { CopyLink } from "@/components/CopyLink";
 import { FlashParams } from "@/components/FlashParams";
 import { getDb } from "@/db/client";
 import {
@@ -16,6 +17,8 @@ import {
   setTripStatus,
   updateTrip,
 } from "@/db/queries";
+import type { Waiver } from "@/db/schema";
+import { getPublishedTemplate, getTripWaivers, issueWaiver } from "@/db/waivers";
 import { formatShortDate, formatTimeRangeTz } from "@/lib/format";
 import { requireStaffSession } from "@/lib/session";
 import { capacityLabel, isFull } from "@/lib/trips";
@@ -47,12 +50,39 @@ const BANNERS: Record<string, { tone: "success" | "danger"; text: string }> = {
   crew: { tone: "success", text: "Crew updated." },
   "booking-removed": { tone: "success", text: "Booking cancelled — the spot is open again." },
   "booking-restored": { tone: "success", text: "Back on the roster." },
+  "waiver-sent": { tone: "success", text: "Waiver link ready — copy it to the diver." },
+  "waiver-no-template": {
+    tone: "danger",
+    text: "No published waiver template yet, so there's nothing to send.",
+  },
   invalid: {
     tone: "danger",
     text: "That didn't save — check the date, times, and capacity, then try again.",
   },
   "end-before-start": { tone: "danger", text: "The trip has to end after it starts." },
 };
+
+const PILL_BASE = "shrink-0 rounded-full px-3 py-1 text-sm font-medium";
+
+/** Waiver readiness at a glance — the roster's "ready to board" precursor. */
+function waiverPill(waiver: Waiver | undefined): { label: string; className: string } {
+  switch (waiver?.status) {
+    case "signed":
+      return { label: "Waiver signed", className: `${PILL_BASE} bg-success/10 text-success` };
+    case "referral_required":
+      return { label: "Medical sign-off", className: `${PILL_BASE} bg-warning/10 text-warning` };
+    case "pending":
+      return {
+        label: "Awaiting signature",
+        className: `${PILL_BASE} bg-primary/10 text-primary`,
+      };
+    default:
+      return {
+        label: "Waiver not sent",
+        className: `${PILL_BASE} border border-border bg-surface-sunken text-muted`,
+      };
+  }
+}
 
 export default async function ManageTripPage({
   params,
@@ -69,10 +99,12 @@ export default async function ManageTripPage({
   if (!shop) notFound();
   const trip = await getTripWithBooked(db, shop.id, tripId);
   if (!trip) notFound();
-  const [staff, crewIds, roster] = await Promise.all([
+  const [staff, crewIds, roster, waiversByBooking, template] = await Promise.all([
     listStaff(db, shop.id),
     getTripCrewIds(db, tripId),
     getTripRoster(db, tripId),
+    getTripWaivers(db, shop.id, tripId),
+    getPublishedTemplate(db, shop.id),
   ]);
   const banner = notice ? BANNERS[notice] : undefined;
   const undoBookingId = notice === "booking-removed" ? bid : undefined;
@@ -143,6 +175,15 @@ export default async function ManageTripPage({
     const bookingId = String(formData.get("bookingId") ?? "");
     if (bookingId) await restoreBooking(await getDb(), s.user.shopId, bookingId);
     redirect(`${back}?notice=booking-restored`);
+  }
+
+  async function sendWaiverAction(formData: FormData) {
+    "use server";
+    const s = await requireStaffSession();
+    const bookingId = String(formData.get("bookingId") ?? "");
+    if (!bookingId) redirect(back);
+    const outcome = await issueWaiver(await getDb(), { shopId: s.user.shopId, bookingId });
+    redirect(`${back}?notice=${outcome.ok ? "waiver-sent" : "waiver-no-template"}`);
   }
 
   const inputClass =
@@ -324,32 +365,56 @@ export default async function ManageTripPage({
             {trip.booked} of {trip.capacity}
           </span>
         </h2>
+        {template ? null : (
+          <p className="mt-2 text-sm text-warning">
+            No published waiver template yet — publish one to start sending waivers.
+          </p>
+        )}
         {roster.length === 0 ? (
           <p className="mt-4 rounded-lg border border-border bg-surface px-4 py-6 text-center text-sm text-muted">
             No bookings yet — share the trip page and they'll show up here.
           </p>
         ) : (
           <ul className="mt-4 divide-y divide-border rounded-lg border border-border bg-surface">
-            {roster.map(({ booking, person }) => (
-              <li
-                key={booking.id}
-                className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
-              >
-                <div className="min-w-0">
-                  <p className="font-medium">{person.fullName}</p>
-                  <p className="text-muted">{person.email ?? "no email on file"}</p>
-                </div>
-                <form action={removeBookingAction} className="shrink-0">
-                  <input type="hidden" name="bookingId" value={booking.id} />
-                  <button
-                    type="submit"
-                    className="min-h-11 rounded-lg px-4 font-medium text-muted transition-colors duration-200 hover:bg-danger/10 hover:text-danger focus-visible:text-danger"
-                  >
-                    Cancel booking
-                  </button>
-                </form>
-              </li>
-            ))}
+            {roster.map(({ booking, person }) => {
+              const waiver = waiversByBooking.get(booking.id);
+              const pill = waiverPill(waiver);
+              return (
+                <li key={booking.id} className="flex flex-col gap-3 px-4 py-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium">{person.fullName}</p>
+                      <p className="text-muted">{person.email ?? "no email on file"}</p>
+                    </div>
+                    <span className={pill.className}>{pill.label}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {waiver?.status === "pending" ? (
+                      <CopyLink path={`/waiver/${waiver.token}`} label="Copy waiver link" />
+                    ) : !waiver && template ? (
+                      <form action={sendWaiverAction}>
+                        <input type="hidden" name="bookingId" value={booking.id} />
+                        <button
+                          type="submit"
+                          className="min-h-11 rounded-lg border border-border bg-surface px-3 text-sm font-medium transition-colors duration-200 hover:bg-surface-sunken"
+                        >
+                          Send waiver
+                        </button>
+                      </form>
+                    ) : null}
+                    <form action={removeBookingAction} className="ml-auto">
+                      <input type="hidden" name="bookingId" value={booking.id} />
+                      <button
+                        type="submit"
+                        className="min-h-11 rounded-lg px-4 font-medium text-muted transition-colors duration-200 hover:bg-danger/10 hover:text-danger focus-visible:text-danger"
+                      >
+                        Cancel booking
+                      </button>
+                    </form>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

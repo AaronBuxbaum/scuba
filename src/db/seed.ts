@@ -1,7 +1,18 @@
+import { randomBytes } from "node:crypto";
 import { hash } from "bcryptjs";
+import { type MedicalQuestion, waiverExpiry } from "@/lib/waivers";
 import type { AppDb } from "./client";
 import { DEV_STAFF_LOGINS } from "./dev-credentials";
-import { bookings, people, personRoles, shops, trips, userAccounts } from "./schema";
+import {
+  bookings,
+  people,
+  personRoles,
+  shops,
+  trips,
+  userAccounts,
+  waivers,
+  waiverTemplates,
+} from "./schema";
 
 /**
  * Demo data: one Key Largo shop with staff, customers, and a week of trips.
@@ -10,6 +21,23 @@ import { bookings, people, personRoles, shops, trips, userAccounts } from "./sch
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** RSTC-style medical statement. A "yes" to any of these needs a physician's sign-off. */
+const MEDICAL_QUESTIONS: MedicalQuestion[] = [
+  { id: "heart", prompt: "Heart disease, heart attack, or heart surgery?" },
+  { id: "lung", prompt: "Asthma, or lung disease requiring treatment?" },
+  { id: "meds", prompt: "Prescription medications (other than birth control)?" },
+  { id: "surgery", prompt: "Surgery in the last 12 months?" },
+  { id: "pregnant", prompt: "Currently pregnant, or trying to become pregnant?" },
+];
+
+const RELEASE_BODY = `This Liability Release and Assumption of Risk is entered into by you and Blue Mantis Divers.
+
+Scuba diving involves inherent risks including, but not limited to, decompression sickness, barotrauma, and drowning, which may result in serious injury or death.
+
+By signing, you affirm that you are in good physical and mental health, that you have disclosed any relevant medical condition, and that you assume all risks of participation. You release Blue Mantis Divers, its staff, and crew from liability to the fullest extent permitted by law.
+
+You confirm the information you provide is accurate and that you are the person named below.`;
 
 /** n days from now at the given local-ish hour/minute (UTC-anchored; demo data). */
 function at(daysFromNow: number, hour: number, minute = 0): Date {
@@ -34,6 +62,19 @@ export async function seedDemo(db: AppDb): Promise<void> {
     })
     .returning();
   if (!shop) throw new Error("seed: failed to insert demo shop");
+
+  const [template] = await db
+    .insert(waiverTemplates)
+    .values({
+      shopId: shop.id,
+      title: "Liability Release & Medical Statement",
+      body: RELEASE_BODY,
+      medicalQuestions: MEDICAL_QUESTIONS,
+      version: 1,
+      status: "published",
+    })
+    .returning();
+  if (!template) throw new Error("seed: failed to insert waiver template");
 
   const staffDefs = [
     { fullName: "Dana Reyes", email: "dana@bluemantis.example", roles: ["owner", "manager"] },
@@ -159,11 +200,67 @@ export async function seedDemo(db: AppDb): Promise<void> {
     ...customers.slice(4, 7).map((c) => ({ tripId: night.id, personId: c.id })),
     ...customers.slice(0, 10).map((c) => ({ tripId: wreck.id, personId: c.id })),
   ];
-  await db.insert(bookings).values(
-    bookingRows.map((row) => ({
-      shopId: shop.id,
-      status: "booked" as const,
-      ...row,
-    })),
+  const bookingRows_ = await db
+    .insert(bookings)
+    .values(
+      bookingRows.map((row) => ({
+        shopId: shop.id,
+        status: "booked" as const,
+        ...row,
+      })),
+    )
+    .returning();
+
+  await seedWaivers(
+    db,
+    shop.id,
+    template.id,
+    bookingRows_.filter((b) => b.tripId === reef.id),
   );
+}
+
+const NO_ANSWERS = { heart: false, lung: false, meds: false, surgery: false, pregnant: false };
+
+/** URL-safe completion-link token. */
+function token(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+/**
+ * A realistic readiness spread for the reef roster so the staff manage view
+ * tells a story: most signed, one awaiting a physician sign-off, the rest still
+ * out for signature.
+ */
+async function seedWaivers(
+  db: AppDb,
+  shopId: string,
+  templateId: string,
+  reefBookings: { id: string }[],
+): Promise<void> {
+  const now = new Date();
+  const rows = reefBookings.map((booking, i) => {
+    const base = { shopId, bookingId: booking.id, templateId, token: token() };
+    if (i < 5) {
+      return {
+        ...base,
+        status: "signed" as const,
+        signature: "Signed at booking",
+        medicalAnswers: NO_ANSWERS,
+        signedAt: now,
+        expiresAt: waiverExpiry(now),
+      };
+    }
+    if (i === 5) {
+      return {
+        ...base,
+        status: "referral_required" as const,
+        signature: "Signed at booking",
+        medicalAnswers: { ...NO_ANSWERS, meds: true },
+        signedAt: now,
+        expiresAt: waiverExpiry(now),
+      };
+    }
+    return { ...base, status: "pending" as const, expiresAt: waiverExpiry(now) };
+  });
+  if (rows.length > 0) await db.insert(waivers).values(rows);
 }
